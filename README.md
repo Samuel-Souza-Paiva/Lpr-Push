@@ -67,13 +67,12 @@ Qualquer dispositivo que enviar POST JSON para `/NotificationInfo/<action>` ver�
 Para empacotar tudo em um único `.exe` (Windows) com ícone e pasta de assets embutida, use o PyInstaller:
 
 ```bash
-python -m pip install pyinstaller
-python -m PyInstaller \
-  --name TollgateDashboard \
-  --onefile \
-  --windowed \
-  --icon assets/icon.ico \
-  --add-data "assets;assets" \
+python -m PyInstaller `
+  --name TollgateDashboard `
+  --onefile `
+  --windowed `
+  --icon assets/icon.ico `
+  --add-data "assets;assets" `
   push-notification.py
 ```
 
