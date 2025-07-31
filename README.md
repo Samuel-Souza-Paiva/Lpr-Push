@@ -43,7 +43,7 @@ Aplicação desktop que recebe notificações de câmeras IP, salva as imagens r
 │   ├── icon.ico       # Ícone do aplicativo
 │   └── logo.png       # Logomarca exibida no cabeçalho
 ├── README.md
-└── tollgate_dashboard.py
+└── push-notification.py
 ```
 
 ## Uso
@@ -51,7 +51,7 @@ Aplicação desktop que recebe notificações de câmeras IP, salva as imagens r
 Execute o script principal:
 
 ```bash
-python tollgate_dashboard.py
+python push-notification.py
 ```
 
 Depois, acesse o servidor HTTP criado pelo Flask em:
@@ -74,7 +74,7 @@ python -m PyInstaller \
   --windowed \
   --icon assets/icon.ico \
   --add-data "assets;assets" \
-  tollgate_dashboard.py
+  push-notification.py
 ```
 
 * `--name`: nome do executável gerado.
@@ -83,7 +83,7 @@ python -m PyInstaller \
 * `--icon`: ícone do app.
 * `--add-data "assets;assets"`: inclui a pasta de `assets` no bundle.
 
-O executável resultante ficará em `dist/TollgateDashboard.exe`.
+O executável resultante ficará em `push-notification.py`.
 
 ## Contribuições
 
