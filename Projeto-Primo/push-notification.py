@@ -59,15 +59,15 @@ def save_image(data):
 
 @flask_app.route('/NotificationInfo/<action>', methods=['POST'])
 def handle_notification(action):
-    if not request.is_json:
-        return jsonify(error="JSON requerido"), 400
-
-    nd = request.json
-    pic = nd.get('Picture', {}).get('NormalPic', {})
-    if not pic.get('Content'):
-        return jsonify(error="Imagem não encontrada"), 400
-
     try:
+        if not request.is_json:
+            return jsonify({"Result": True}), 200  # Mesmo se inválido
+
+        nd = request.json
+        pic = nd.get('Picture', {}).get('NormalPic', {})
+        if not pic.get('Content'):
+            return jsonify({"Result": True}), 200  # Mesmo sem imagem
+
         path, plate_number = save_image(nd)
         client_ip = request.remote_addr
         notif_signal.new_notification.emit({
@@ -75,10 +75,12 @@ def handle_notification(action):
             'plate_number': plate_number,
             'client_ip': client_ip
         })
-    except Exception as e:
-        return jsonify(error=str(e)), 500
 
-    return jsonify(Result=True), 200
+    except Exception as e:
+        logging.error(f"[ERRO] Falha ao processar notificação: {e}", exc_info=True)
+
+    return jsonify({"Result": True}), 200
+
 
 # --- Servidor Flask em thread ---
 class FlaskThread(threading.Thread):
@@ -277,3 +279,4 @@ if __name__ == "__main__":
     window = MainWindow()
     window.show()
     sys.exit(app.exec())
+
