@@ -1,4 +1,1 @@
-add--> evento texto .json na lateral
-add--> alterar o ITC-push
-ADD--> SINAL ONLINE
-CORRIGIR--> POP UP
+
