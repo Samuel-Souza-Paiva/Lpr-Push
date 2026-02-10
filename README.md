@@ -52,3 +52,26 @@ Faça um fork do projeto;
 Crie uma branch (git checkout -b minha-feature);
 
 Envie seu pull request.
+
+## LPR-push (headless Linux)
+
+O modulo `LPR-push/push-notification.py` agora roda sem interface grafica e pode ser executado em Linux.
+
+### Dependencias
+
+```bash
+python3 -m pip install -r LPR-push/requirements.txt
+```
+
+### Execucao
+
+```bash
+python3 LPR-push/push-notification.py --host 0.0.0.0 --port 8080
+```
+
+### Opcoes uteis
+
+- `--output-dir /caminho/para/imagens`
+- `--log-level INFO`
+- endpoint de saude: `GET /health`
+- endpoint da camera: `POST /NotificationInfo/<action>`

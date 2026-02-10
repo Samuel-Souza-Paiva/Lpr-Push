@@ -1,281 +1,136 @@
-import sys
-import os
+import argparse
 import base64
 import logging
-import threading
+import os
 import socket
 from datetime import datetime
+from pathlib import Path
+from typing import Any, Dict, Tuple
 
-from flask import Flask, request, jsonify
+from flask import Flask, jsonify, request
 from werkzeug.serving import make_server
 
-from PySide6.QtWidgets import (
-    QApplication, QMainWindow, QWidget, QLabel, QVBoxLayout,
-    QHBoxLayout, QPushButton, QSplitter, QTableWidget, QTableWidgetItem,
-    QMessageBox
-)
-from PySide6.QtGui import QPixmap, QIcon
-from PySide6.QtCore import Qt, Signal, QObject
 
-# --- Utilitário para obter IP local ---
-def get_server_ip():
-    s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-    try:
-        s.connect(('8.8.8.8', 80))
-        ip = s.getsockname()[0]
-    except Exception:
-        ip = '127.0.0.1'
-    finally:
-        s.close()
-    return ip
+DEFAULT_HOST = "0.0.0.0"
+DEFAULT_PORT = 8080
 
-# --- Configuração do Flask ---
 flask_app = Flask(__name__)
-log = logging.getLogger('werkzeug')
-log.setLevel(logging.ERROR)
+logger = logging.getLogger("lpr-push")
+server_config = {"image_dir": Path.home() / "tollgate_images"}
 
-# Sinal para comunicar notificações à GUI
-class NotificationSignal(QObject):
-    new_notification = Signal(dict)
 
-notif_signal = NotificationSignal()
+def get_server_ip() -> str:
+    sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    try:
+        sock.connect(("8.8.8.8", 80))
+        return sock.getsockname()[0]
+    except OSError:
+        return "127.0.0.1"
+    finally:
+        sock.close()
 
-def save_image(data):
-    """Salva a imagem no Desktop/Tollgate_Images e retorna caminho e placa."""
-    desktop = os.path.join(os.path.expanduser('~'), 'Desktop')
-    folder = os.path.join(desktop, 'Tollgate_Images')
-    os.makedirs(folder, exist_ok=True)
 
-    pic = data['Picture']['NormalPic']
-    file_name = pic.get('PicName', 'image.jpg')
-    image_bytes = base64.b64decode(pic['Content'])
-    path = os.path.join(folder, file_name)
-    with open(path, 'wb') as f:
-        f.write(image_bytes)
+def configure_logging(level: str) -> None:
+    logging.basicConfig(
+        level=getattr(logging, level.upper(), logging.INFO),
+        format="%(asctime)s %(levelname)s %(message)s",
+    )
+    logging.getLogger("werkzeug").setLevel(logging.WARNING)
 
-    plate_number = data['Picture'].get('Plate', {}).get('PlateNumber', 'Unknown')
-    return path, plate_number
 
-@flask_app.route('/NotificationInfo/<action>', methods=['POST'])
-def handle_notification(action):
+def ensure_output_dir(output_dir: Path) -> Path:
+    output_dir.mkdir(parents=True, exist_ok=True)
+    return output_dir
+
+
+def save_image(data: Dict[str, Any]) -> Tuple[Path, str]:
+    picture = data["Picture"]["NormalPic"]
+    file_name = picture.get("PicName", f"image_{datetime.now():%Y%m%d_%H%M%S}.jpg")
+    file_name = os.path.basename(file_name)
+
+    image_bytes = base64.b64decode(picture["Content"])
+    destination = server_config["image_dir"] / file_name
+    destination.write_bytes(image_bytes)
+
+    plate_number = data.get("Picture", {}).get("Plate", {}).get("PlateNumber", "Unknown")
+    return destination, plate_number
+
+
+@flask_app.route("/health", methods=["GET"])
+def health() -> Tuple[Dict[str, str], int]:
+    return {"status": "ok"}, 200
+
+
+@flask_app.route("/NotificationInfo/<action>", methods=["POST"])
+def handle_notification(action: str):
     try:
         if not request.is_json:
-            return jsonify({"Result": True}), 200  # Mesmo se inválido
+            logger.warning("Payload without JSON from %s", request.remote_addr)
+            return jsonify({"Result": True}), 200
 
-        nd = request.json
-        pic = nd.get('Picture', {}).get('NormalPic', {})
-        if not pic.get('Content'):
-            return jsonify({"Result": True}), 200  # Mesmo sem imagem
+        notification_data = request.get_json(silent=True) or {}
+        normal_picture = notification_data.get("Picture", {}).get("NormalPic", {})
 
-        path, plate_number = save_image(nd)
-        client_ip = request.remote_addr
-        notif_signal.new_notification.emit({
-            'file_path': path,
-            'plate_number': plate_number,
-            'client_ip': client_ip
-        })
+        if not normal_picture.get("Content"):
+            logger.warning(
+                "Notification without image. action=%s ip=%s",
+                action,
+                request.remote_addr,
+            )
+            return jsonify({"Result": True}), 200
 
-    except Exception as e:
-        logging.error(f"[ERRO] Falha ao processar notificação: {e}", exc_info=True)
+        image_path, plate_number = save_image(notification_data)
+        logger.info(
+            "Notification processed. action=%s ip=%s plate=%s file=%s",
+            action,
+            request.remote_addr,
+            plate_number,
+            image_path,
+        )
+    except Exception as exc:
+        logger.exception("Failed to process notification: %s", exc)
 
     return jsonify({"Result": True}), 200
 
 
-# --- Servidor Flask em thread ---
-class FlaskThread(threading.Thread):
-    def __init__(self):
-        super().__init__(daemon=True)
-        self.server = make_server('0.0.0.0', 8080, flask_app)
-        self.ctx = flask_app.app_context()
-        self.ctx.push()
+def parse_args() -> argparse.Namespace:
+    parser = argparse.ArgumentParser(
+        description="LPR Push server without GUI (Linux compatible)",
+    )
+    parser.add_argument("--host", default=DEFAULT_HOST, help="Server bind host")
+    parser.add_argument("--port", type=int, default=DEFAULT_PORT, help="Server port")
+    parser.add_argument(
+        "--output-dir",
+        default=os.getenv("LPR_PUSH_OUTPUT_DIR", str(Path.home() / "tollgate_images")),
+        help="Directory used to store received images",
+    )
+    parser.add_argument(
+        "--log-level",
+        default=os.getenv("LPR_PUSH_LOG_LEVEL", "INFO"),
+        help="Log level (DEBUG, INFO, WARNING, ERROR)",
+    )
+    return parser.parse_args()
 
-    def run(self):
-        self.server.serve_forever()
 
-    def shutdown(self):
-        self.server.shutdown()
+def main() -> None:
+    args = parse_args()
+    configure_logging(args.log_level)
 
-# --- Interface PySide6 ---
-class MainWindow(QMainWindow):
-    def __init__(self):
-        super().__init__()
-        # Define ícone do aplicativo
-        icon_path = os.path.join(os.path.dirname(__file__), "assets", "icon.ico")
-        if os.path.exists(icon_path):
-            self.setWindowIcon(QIcon(icon_path))
+    output_dir = ensure_output_dir(Path(args.output_dir).expanduser())
+    server_config["image_dir"] = output_dir
 
-        self.server_ip = get_server_ip()
-        self.setWindowTitle(f"Tollgate Dashboard — {self.server_ip}:8080")
-        self.resize(900, 600)
-        # Estado de dispositivos conectados
-        self.connected_ips = set()
-        self.current_msg_box = None
-        self._build_ui()
-        self._start_flask()
+    logger.info("Server starting at http://%s:%s", args.host, args.port)
+    logger.info("Detected local IP: %s", get_server_ip())
+    logger.info("Image directory: %s", output_dir)
 
-    def _build_ui(self):
-        central = QWidget()
-        central.setStyleSheet("background-color: #000000;")
-        self.setCentralWidget(central)
-        main_layout = QVBoxLayout(central)
+    server = make_server(args.host, args.port, flask_app)
+    try:
+        server.serve_forever()
+    except KeyboardInterrupt:
+        logger.info("Server stopped by user")
+    finally:
+        server.shutdown()
 
-        # Cabeçalho
-        header = QWidget()
-        header.setFixedHeight(60)
-        header.setStyleSheet(
-            "background: qlineargradient(spread:pad, x1:0, y1:0, x2:1, y2:0, stop:0 #003610, stop:1 #003611);"
-            "margin: 0; padding: 0;"
-            # "border-bottom: 1px solid #004d00;"
-            # border-style: solid;
-        )
-        hl = QHBoxLayout(header)
-        hl.setContentsMargins(15, 0, 15, 0)
-        logo = QLabel()
-        logo_path = os.path.join(os.path.dirname(__file__), "assets", "logo.png")
-        logo.setPixmap(QPixmap(logo_path).scaledToHeight(40, Qt.SmoothTransformation))
-        hl.addWidget(logo)
-        title = QLabel("Intelbras LPR PUSH Notification")
-        subtitle = QLabel("*Este app está em desenvolvimento e não deve ser usado em produção.*\n"
-                        "-->Use com cautela! Qualquer bug contatar: Gustavo Prim Back ou Samuel Vasconcelos.")
-        title.setStyleSheet("color: white; font-size: 20px; font-weight: bold;")
-        hl.addWidget(title)
-        hl.addStretch()
-        hl.addWidget(subtitle)
-        main_layout.addWidget(header)
-
-        # Splitter
-        splitter = QSplitter(Qt.Horizontal)
-
-        # Painel esquerdo
-        left_panel = QWidget()
-        left_panel.setStyleSheet("background-color: transparent;")
-        left_layout = QVBoxLayout(left_panel)
-        left_layout.setContentsMargins(10, 10, 10, 10)
-
-        # Exibe IP do servidor
-        self.ip_label = QLabel(f"Servidor: http://{self.server_ip}:8080")
-        self.ip_label.setStyleSheet("color: white; font-size: 14px; margin-bottom: 10px;")
-        left_layout.addWidget(self.ip_label)
-
-        # Indicador de conexão
-        status_layout = QHBoxLayout()
-        status_layout.setContentsMargins(0, 0, 0, 10)
-        status_label = QLabel("Dispositivos:")
-        status_label.setStyleSheet("color: white; font-size: 14px;")
-        status_layout.addWidget(status_label)
-        self.status_indicator = QLabel()
-        self.status_indicator.setFixedSize(15, 15)
-        self.status_indicator.setStyleSheet("background-color: red; border-radius: 7px;")
-        status_layout.addWidget(self.status_indicator)
-        self.device_label = QLabel("Nenhum")
-        self.device_label.setStyleSheet("color: white; font-size: 14px; margin-left: 10px;")
-        status_layout.addWidget(self.device_label)
-        status_layout.addStretch()
-        left_layout.addLayout(status_layout)
-
-        test_btn = QPushButton("Testar Notificação")
-        test_btn.setFixedHeight(40)
-        test_btn.setStyleSheet(
-            "background-color: #00a651; color: white; border-radius: 5px; font-size: 14px;"
-        )
-        test_btn.clicked.connect(self.fake_notification)
-        left_layout.addWidget(test_btn)
-        left_layout.addStretch()
-        splitter.addWidget(left_panel)
-
-        # Painel direito
-        right_panel = QWidget()
-        right_panel.setStyleSheet("background-color: transparent;")
-        right_layout = QVBoxLayout(right_panel)
-        right_layout.setContentsMargins(10, 10, 10, 10)
-
-        # Preview de imagem
-        self.image_preview = QLabel()
-        self.image_preview.setFixedSize(300, 200)
-        self.image_preview.setStyleSheet("background-color: #222222; border: 1px solid #444444;")
-        self.image_preview.setAlignment(Qt.AlignCenter)
-        right_layout.addWidget(self.image_preview)
-
-        # Tabela de notificações
-        self.table = QTableWidget()
-        self.table.setColumnCount(3)
-        self.table.setHorizontalHeaderLabels(["Data/Hora", "Placa", "Arquivo"])
-        self.table.horizontalHeader().setStretchLastSection(True)
-        self.table.verticalHeader().setVisible(False)
-        self.table.setAlternatingRowColors(True)
-        self.table.setStyleSheet(
-            "alternate-background-color: #121212; background-color: #000000; color: white;"
-        )
-        right_layout.addWidget(self.table)
-        splitter.addWidget(right_panel)
-        main_layout.addWidget(splitter)
-
-        notif_signal.new_notification.connect(self.on_new_notification)
-
-    def _start_flask(self):
-        self.flask_thread = FlaskThread()
-        self.flask_thread.start()
-
-    def on_new_notification(self, info):
-        # Atualiza status de dispositivos
-        ip = info.get('client_ip')
-        if ip:
-            self.connected_ips.add(ip)
-            self.status_indicator.setStyleSheet("background-color: green; border-radius: 7px;")
-            self.device_label.setText(ip)
-
-        # Atualiza preview de imagem
-        pix = QPixmap(info['file_path'])
-        if not pix.isNull():
-            self.image_preview.setPixmap(
-                pix.scaled(self.image_preview.size(), Qt.KeepAspectRatio, Qt.SmoothTransformation)
-            )
-
-        # Adiciona linha na tabela
-        row = self.table.rowCount()
-        self.table.insertRow(row)
-        now = datetime.now().strftime("%d/%m/%Y %H:%M:%S")
-        self.table.setItem(row, 0, QTableWidgetItem(now))
-        self.table.setItem(row, 1, QTableWidgetItem(info['plate_number']))
-        self.table.setItem(row, 2, QTableWidgetItem(info['file_path']))
-
-        # Fecha pop-up anterior, se existir
-        if self.current_msg_box and self.current_msg_box.isVisible():
-            self.current_msg_box.close()
-
-        # Pop-up não modal
-        box = QMessageBox(self)
-        box.setWindowTitle("Nova Notificação")
-        box.setText(f"Placa: {info['plate_number']}\nIP: {ip}\n{info['file_path']}")
-        box.setStandardButtons(QMessageBox.Ok)
-        box.setModal(False)
-        box.show()
-        self.current_msg_box = box
-
-    def fake_notification(self):
-        fake = {
-            "Picture": {
-                "NormalPic": {
-                    "Content": base64.b64encode(b"fakeimage").decode(),
-                    "PicName": "teste.jpg"
-                },
-                "Plate": {"PlateNumber": "ABC1234"}
-            }
-        }
-        # Emula chamado com IP local
-        notif_signal.new_notification.emit({
-            'file_path': 'teste.jpg',
-            'plate_number': 'ABC1234',
-            'client_ip': self.server_ip
-        })
-
-    def closeEvent(self, ev):
-        self.flask_thread.shutdown()
-        super().closeEvent(ev)
 
 if __name__ == "__main__":
-    app = QApplication(sys.argv)
-    window = MainWindow()
-    window.show()
-    sys.exit(app.exec())
-
+    main()
